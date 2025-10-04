@@ -1,0 +1,135 @@
+# Random suffix to ensure globally unique names
+resource "random_string" "suffix" {
+  length  = 6
+  special = false
+  upper   = false
+}
+
+locals {
+  resource_prefix = "${var.project_name}-${var.environment}"
+  common_tags = merge(
+    var.tags,
+    {
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+    }
+  )
+}
+
+# Resource Group - Everything goes here
+resource "azurerm_resource_group" "main" {
+  name     = "${local.resource_prefix}-rg"
+  location = var.location
+  tags     = local.common_tags
+}
+
+# Storage Account - For data lake, logs, artifacts
+resource "azurerm_storage_account" "main" {
+  name                     = "${replace(var.project_name, "-", "")}${var.environment}${random_string.suffix.result}"
+  resource_group_name      = azurerm_resource_group.main.name
+  location                 = azurerm_resource_group.main.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"  # Cheapest option
+  
+  # Cost optimization
+  enable_https_traffic_only = true
+  min_tls_version          = "TLS1_2"
+  
+  tags = local.common_tags
+}
+
+# Blob containers for different purposes
+resource "azurerm_storage_container" "raw_data" {
+  name                  = "raw-data"
+  storage_account_name  = azurerm_storage_account.main.name
+  container_access_type = "private"
+}
+
+resource "azurerm_storage_container" "processed_data" {
+  name                  = "processed-data"
+  storage_account_name  = azurerm_storage_account.main.name
+  container_access_type = "private"
+}
+
+resource "azurerm_storage_container" "model_artifacts" {
+  name                  = "model-artifacts"
+  storage_account_name  = azurerm_storage_account.main.name
+  container_access_type = "private"
+}
+
+resource "azurerm_storage_container" "logs" {
+  name                  = "logs"
+  storage_account_name  = azurerm_storage_account.main.name
+  container_access_type = "private"
+}
+
+# Azure Container Registry - For Docker images
+resource "azurerm_container_registry" "main" {
+  name                = "${replace(var.project_name, "-", "")}${var.environment}acr${random_string.suffix.result}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  sku                 = "Basic"  # Cheapest tier ($5/month, $0.167/day)
+  admin_enabled       = true      # Allows docker login with username/password
+  
+  tags = local.common_tags
+}
+
+
+# Azure Kubernetes Service - Model deployment platform
+resource "azurerm_kubernetes_cluster" "main" {
+  name                = "${local.resource_prefix}-aks"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  dns_prefix          = "${local.resource_prefix}-aks"
+  
+  # Cost-optimized default node pool
+  default_node_pool {
+    name                = "default"
+    vm_size             = var.aks_vm_size
+    enable_auto_scaling = true
+    min_count           = 1
+    max_count           = 3
+    os_disk_size_gb     = 30
+  }
+  
+  identity {
+    type = "SystemAssigned"
+  }
+  
+  network_profile {
+    network_plugin    = "kubenet"
+    load_balancer_sku = "standard"
+  }
+  
+  http_application_routing_enabled = false
+  
+  tags = local.common_tags
+}
+
+# Give AKS permission to pull from ACR
+resource "azurerm_role_assignment" "aks_acr_pull" {
+  principal_id                     = azurerm_kubernetes_cluster.main.kubelet_identity[0].object_id
+  role_definition_name             = "AcrPull"
+  scope                            = azurerm_container_registry.main.id
+  skip_service_principal_aad_check = true
+}
+
+# Azure Databricks Workspace - ML training platform
+resource "azurerm_databricks_workspace" "main" {
+  name                = "${local.resource_prefix}-databricks"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  sku                 = var.databricks_sku
+  
+  tags = local.common_tags
+}
+
+# Get current user info
+data "azurerm_client_config" "current" {}
+
+# Add current user as Databricks workspace admin
+resource "azurerm_role_assignment" "databricks_admin" {
+  scope                = azurerm_databricks_workspace.main.id
+  role_definition_name = "Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}

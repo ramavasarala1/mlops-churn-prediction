@@ -1,0 +1,24 @@
+# Copy this file to terraform.tfvars and fill in your values
+# terraform.tfvars is in .gitignore so your secrets stay safe
+
+project_name = "mlops-demo"
+environment  = "dev"
+location     = "westus2"  # Arizona - closest to you
+
+# Your Azure subscription details (don't commit the actual .tfvars file!)
+# subscription_id = "5f6d8aa1-fd8c-4973-bc41-06d15c530f2a"
+# tenant_id       = "3c4f122d-4fac-43ab-be64-5bb4fe66b1e7
+
+# Cost optimization
+aks_node_count     = 2
+aks_vm_size        = "Standard_B2s"  # Cheap for demo
+use_spot_instances = true
+databricks_sku     = "standard"
+
+# Tags for cost tracking
+tags = {
+  Project     = "MLOps-Enterprise-Demo"
+  Environment = "Development"
+  ManagedBy   = "Terraform"
+  Owner       = "YourName"
+}
