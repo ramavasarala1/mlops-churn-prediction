@@ -142,7 +142,7 @@ async def readiness_check():
 # Prediction endpoint
 @app.post("/predict", response_model=PredictionResponse)
 @PREDICTION_LATENCY.time()
-async def predict_churn(features: CustomerFeatures):
+def predict_churn(features: CustomerFeatures):
     """Predict customer churn probability"""
     PREDICTION_COUNTER.inc()
     
@@ -192,14 +192,14 @@ async def predict_churn(features: CustomerFeatures):
 
 # Batch prediction endpoint
 @app.post("/predict/batch")
-async def predict_batch(customers: List[CustomerFeatures]):
+def predict_batch(customers: List[CustomerFeatures]):
     """Batch prediction endpoint"""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     predictions = []
     for customer in customers:
-        result = await predict_churn(customer)
+        result = predict_churn(customer)
         predictions.append(result)
     
     return {"predictions": predictions, "count": len(predictions)}
