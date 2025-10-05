@@ -29,15 +29,24 @@ def download_model(model_name, model_stage="Staging", output_dir="./models"):
         if not databricks_host or not databricks_token:
             raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
         
-        # Set MLflow tracking URI
-        mlflow.set_tracking_uri(f"databricks://{databricks_host}")
+        # Remove https:// if present
+        databricks_host = databricks_host.replace("https://", "")
+        
+        # Set environment variables for Databricks authentication
+        os.environ['DATABRICKS_HOST'] = databricks_host
         os.environ['DATABRICKS_TOKEN'] = databricks_token
+        
+        # Set MLflow tracking URI using REST API format
+        tracking_uri = f"https://{databricks_host}"
+        mlflow.set_tracking_uri(tracking_uri)
         
         logger.info(f"Connecting to Databricks: {databricks_host}")
         logger.info(f"Model: {model_name}, Stage: {model_stage}")
         
+        # Create MLflow client with explicit authentication
+        client = MlflowClient(tracking_uri=tracking_uri)
+        
         # Get model version
-        client = MlflowClient()
         versions = client.get_latest_versions(model_name, stages=[model_stage])
         
         if not versions:
@@ -46,10 +55,14 @@ def download_model(model_name, model_stage="Staging", output_dir="./models"):
         model_version = versions[0]
         logger.info(f"Found model version: {model_version.version}")
         
-        # Download model
+        # Download model using direct URI
         model_uri = f"models:/{model_name}/{model_stage}"
         logger.info(f"Downloading from: {model_uri}")
         
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Download model artifacts
         model_path = mlflow.artifacts.download_artifacts(
             artifact_uri=model_uri,
             dst_path=output_dir
@@ -66,7 +79,6 @@ def download_model(model_name, model_stage="Staging", output_dir="./models"):
             "run_id": model_version.run_id
         }
         
-        os.makedirs(output_dir, exist_ok=True)
         with open(f"{output_dir}/metadata.json", 'w') as f:
             json.dump(metadata, f, indent=2)
         
@@ -75,6 +87,8 @@ def download_model(model_name, model_stage="Staging", output_dir="./models"):
         
     except Exception as e:
         logger.error(f"❌ Failed to download model: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 if __name__ == "__main__":
