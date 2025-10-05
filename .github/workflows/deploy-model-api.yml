@@ -209,12 +209,14 @@ jobs:
       - name: Run smoke tests
         run: |
           echo "Waiting for service to be ready..."
-          sleep 30
-          
+
+          kubectl wait --for=condition=ready pod -l app=churn-model -n dev --timeout=2m
+
           POD=$(kubectl get pod -n dev -l app=churn-model -o jsonpath="{.items[0].metadata.name}")
-          
-          # Test health endpoint
-          kubectl exec -n dev $POD -- curl -f http://localhost:8000/health
+    
+          # Test health endpoint using python
+          echo "Testing health endpoint..."
+          kubectl exec -n dev $POD -- python -c "import requests; r=requests.get('http://localhost:8000/health'); print(r.json()); exit(0 if r.status_code==200 else 1)"
           
           echo "✅ Dev deployment successful"
 
