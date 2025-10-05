@@ -1,6 +1,5 @@
 """
 Downloads model from Databricks MLflow Registry
-Run during Docker build to embed model in container
 """
 
 import os
@@ -15,35 +14,33 @@ logger = logging.getLogger(__name__)
 def download_model(model_name, model_stage="Staging", output_dir="./models"):
     """
     Download model from Databricks MLflow
-    
-    Args:
-        model_name: Name in MLflow Registry (e.g., 'churn_prediction_model')
-        model_stage: Stage to download from (Staging, Production, None)
-        output_dir: Where to save model
     """
     try:
-        # Get credentials from environment
         databricks_host = os.getenv("DATABRICKS_HOST")
         databricks_token = os.getenv("DATABRICKS_TOKEN")
         
         if not databricks_host or not databricks_token:
             raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
         
-        # Remove https:// if present
-        databricks_host = databricks_host.replace("https://", "")
+        # Clean host - remove protocol if present
+        databricks_host = databricks_host.replace("https://", "").replace("http://", "")
         
-        # Set environment variables for Databricks authentication
+        # Set tracking URI
+        tracking_uri = f"https://{databricks_host}"
+        
+        # CRITICAL: Set token in environment for MLflow to use
         os.environ['DATABRICKS_HOST'] = databricks_host
         os.environ['DATABRICKS_TOKEN'] = databricks_token
         
-        # Set MLflow tracking URI using REST API format
-        tracking_uri = f"https://{databricks_host}"
+        # Also set as MLflow environment variable
+        os.environ['MLFLOW_TRACKING_TOKEN'] = databricks_token
+        
         mlflow.set_tracking_uri(tracking_uri)
         
-        logger.info(f"Connecting to Databricks: {databricks_host}")
+        logger.info(f"Connecting to: {tracking_uri}")
         logger.info(f"Model: {model_name}, Stage: {model_stage}")
         
-        # Create MLflow client with explicit authentication
+        # Create client
         client = MlflowClient(tracking_uri=tracking_uri)
         
         # Get model version
@@ -55,14 +52,12 @@ def download_model(model_name, model_stage="Staging", output_dir="./models"):
         model_version = versions[0]
         logger.info(f"Found model version: {model_version.version}")
         
-        # Download model using direct URI
+        # Download model
         model_uri = f"models:/{model_name}/{model_stage}"
         logger.info(f"Downloading from: {model_uri}")
         
-        # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
-        # Download model artifacts
         model_path = mlflow.artifacts.download_artifacts(
             artifact_uri=model_uri,
             dst_path=output_dir
@@ -86,7 +81,7 @@ def download_model(model_name, model_stage="Staging", output_dir="./models"):
         return model_path
         
     except Exception as e:
-        logger.error(f"❌ Failed to download model: {e}")
+        logger.error(f"❌ Failed: {e}")
         import traceback
         traceback.print_exc()
         raise
