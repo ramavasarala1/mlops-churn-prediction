@@ -1,47 +1,86 @@
+---
+# ConfigMap for model configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: churn-model-config
+data:
+  MODEL_NAME: "churn_prediction_model"
+  MODEL_VERSION: "${MODEL_VERSION}"
+  ENVIRONMENT: "${NAMESPACE}"
+  LOG_LEVEL: "INFO"
+---
+# Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: churn-api
-  namespace: default
+  name: churn-model
   labels:
-    app: churn-api
-    version: v1.0
+    app: churn-model
+    environment: ${NAMESPACE}
 spec:
-  replicas: 2
+  replicas: 1  # Will be overridden per environment
   selector:
     matchLabels:
-      app: churn-api
+      app: churn-model
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
-        app: churn-api
-        version: v1.0
+        app: churn-model
+        environment: ${NAMESPACE}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
-      - name: churn-api
-        image: mlopsdemodevacr41ih2a.azurecr.io/churn-api:v1.0
+      - name: churn-model
+        image: ${IMAGE}
+        imagePullPolicy: Always
         ports:
         - containerPort: 8000
           name: http
+          protocol: TCP
         env:
+        - name: MODEL_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: churn-model-config
+              key: MODEL_NAME
         - name: MODEL_VERSION
-          value: "v1.0"
+          valueFrom:
+            configMapKeyRef:
+              name: churn-model-config
+              key: MODEL_VERSION
         - name: ENVIRONMENT
-          value: "production"
+          valueFrom:
+            configMapKeyRef:
+              name: churn-model-config
+              key: ENVIRONMENT
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: churn-model-config
+              key: LOG_LEVEL
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "250m"
+            cpu: 100m
+            memory: 256Mi
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            cpu: 500m
+            memory: 512Mi
         livenessProbe:
           httpGet:
             path: /health
             port: 8000
           initialDelaySeconds: 30
           periodSeconds: 10
-          timeoutSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:
@@ -52,40 +91,45 @@ spec:
           timeoutSeconds: 3
           failureThreshold: 3
 ---
+# Service
 apiVersion: v1
 kind: Service
 metadata:
-  name: churn-api-service
-  namespace: default
+  name: churn-model
   labels:
-    app: churn-api
+    app: churn-model
 spec:
-  type: ClusterIP
-  selector:
-    app: churn-api
+  type: LoadBalancer
   ports:
   - port: 80
     targetPort: 8000
     protocol: TCP
     name: http
+  selector:
+    app: churn-model
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# Horizontal Pod Autoscaler (for production)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
 metadata:
-  name: churn-api-ingress
-  namespace: default
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  name: churn-model-hpa
 spec:
-  ingressClassName: nginx
-  rules:
-  - http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: churn-api-service
-            port:
-              number: 80
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: churn-model
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
