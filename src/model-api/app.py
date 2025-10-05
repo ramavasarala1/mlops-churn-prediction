@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Dict
+from typing import List
 import pandas as pd
 import numpy as np
-import pickle
+import mlflow
 import json
+import os
 from datetime import datetime
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response
@@ -26,8 +27,9 @@ PREDICTION_COUNTER = Counter('predictions_total', 'Total number of predictions')
 PREDICTION_LATENCY = Histogram('prediction_latency_seconds', 'Prediction latency')
 CHURN_PREDICTIONS = Counter('churn_predictions_total', 'Total churn predictions', ['prediction'])
 
-# Model placeholder
+# Global variables
 model = None
+model_metadata = {}
 feature_names = [
     'tenure_months',
     'monthly_charges',
@@ -87,62 +89,33 @@ class HealthResponse(BaseModel):
     timestamp: str
     version: str
 
-# Helper function for prediction logic
-def make_prediction(feature_dict: dict) -> dict:
-    """Core prediction logic"""
-    # Simple rule-based prediction for demo
-    churn_score = 0.0
-    
-    # High risk contract (most important feature - 35%)
-    if feature_dict['high_risk_contract'] == 1:
-        churn_score += 0.35
-    
-    # High monthly charges (19% importance)
-    if feature_dict['monthly_charges'] > 80:
-        churn_score += 0.20
-    
-    # Low tenure (12% importance)
-    if feature_dict['tenure_months'] < 12:
-        churn_score += 0.15
-    
-    # No support services (10% importance)
-    if feature_dict['no_support_services'] == 1:
-        churn_score += 0.15
-    
-    # Senior citizen (5% importance)
-    if feature_dict['senior_citizen'] == 1:
-        churn_score += 0.05
-    
-    # Add some randomness
-    churn_score += np.random.uniform(-0.1, 0.1)
-    churn_probability = min(max(churn_score, 0.0), 1.0)
-    
-    # Make prediction
-    churn_prediction = 1 if churn_probability > 0.5 else 0
-    
-    # Determine risk level
-    if churn_probability < 0.3:
-        risk_level = "low"
-    elif churn_probability < 0.6:
-        risk_level = "medium"
-    else:
-        risk_level = "high"
-    
-    return {
-        "churn_prediction": churn_prediction,
-        "churn_probability": churn_probability,
-        "risk_level": risk_level
-    }
-
 # Startup: Load model
 @app.on_event("startup")
 async def load_model():
     """Load model on startup"""
-    global model
+    global model, model_metadata
+    
     try:
-        logger.info("Loading model...")
-        model = "dummy"  # Placeholder
-        logger.info("✅ Model loaded successfully")
+        logger.info("Loading model from /app/models/...")
+        
+        # Load metadata
+        metadata_path = "/app/models/metadata.json"
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r') as f:
+                model_metadata = json.load(f)
+            logger.info(f"Model metadata: {model_metadata}")
+        
+        # Load model using MLflow
+        model_path = "/app/models"
+        if os.path.exists(model_path):
+            model = mlflow.sklearn.load_model(model_path)
+            logger.info("✅ Model loaded successfully")
+            logger.info(f"   Model version: {model_metadata.get('version', 'unknown')}")
+            logger.info(f"   Model stage: {model_metadata.get('stage', 'unknown')}")
+        else:
+            logger.error(f"❌ Model path not found: {model_path}")
+            model = None
+            
     except Exception as e:
         logger.error(f"❌ Failed to load model: {e}")
         model = None
@@ -168,6 +141,7 @@ async def readiness_check():
 
 # Prediction endpoint
 @app.post("/predict", response_model=PredictionResponse)
+@PREDICTION_LATENCY.time()
 async def predict_churn(features: CustomerFeatures):
     """Predict customer churn probability"""
     PREDICTION_COUNTER.inc()
@@ -176,26 +150,39 @@ async def predict_churn(features: CustomerFeatures):
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        # Convert features to dict
+        # Convert features to DataFrame
         feature_dict = features.dict()
+        input_df = pd.DataFrame([feature_dict])
+        
+        # Ensure correct column order
+        input_df = input_df[feature_names]
         
         # Make prediction
-        result = make_prediction(feature_dict)
+        churn_prediction = int(model.predict(input_df)[0])
+        churn_probability = float(model.predict_proba(input_df)[0][1])
+        
+        # Determine risk level
+        if churn_probability < 0.3:
+            risk_level = "low"
+        elif churn_probability < 0.6:
+            risk_level = "medium"
+        else:
+            risk_level = "high"
         
         # Track metrics
-        CHURN_PREDICTIONS.labels(prediction=str(result['churn_prediction'])).inc()
+        CHURN_PREDICTIONS.labels(prediction=str(churn_prediction)).inc()
         
         # Generate response
         response = PredictionResponse(
             customer_id=f"CUST_{np.random.randint(100000, 999999)}",
-            churn_prediction=result['churn_prediction'],
-            churn_probability=round(result['churn_probability'], 4),
-            risk_level=result['risk_level'],
+            churn_prediction=churn_prediction,
+            churn_probability=round(churn_probability, 4),
+            risk_level=risk_level,
             timestamp=datetime.utcnow().isoformat(),
-            model_version="v1.0"
+            model_version=f"v{model_metadata.get('version', '1.0')}"
         )
         
-        logger.info(f"Prediction: {result['churn_prediction']}, Probability: {result['churn_probability']:.4f}")
+        logger.info(f"Prediction: {churn_prediction}, Probability: {churn_probability:.4f}")
         
         return response
         
@@ -212,18 +199,8 @@ async def predict_batch(customers: List[CustomerFeatures]):
     
     predictions = []
     for customer in customers:
-        feature_dict = customer.dict()
-        result = make_prediction(feature_dict)
-        
-        pred_response = PredictionResponse(
-            customer_id=f"CUST_{np.random.randint(100000, 999999)}",
-            churn_prediction=result['churn_prediction'],
-            churn_probability=round(result['churn_probability'], 4),
-            risk_level=result['risk_level'],
-            timestamp=datetime.utcnow().isoformat(),
-            model_version="v1.0"
-        )
-        predictions.append(pred_response)
+        result = await predict_churn(customer)
+        predictions.append(result)
     
     return {"predictions": predictions, "count": len(predictions)}
 
@@ -238,13 +215,14 @@ async def metrics():
 async def model_info():
     """Get model information"""
     return {
-        "model_name": "churn_prediction_model",
-        "version": "1.0.0",
+        "model_name": model_metadata.get("model_name", "churn_prediction_model"),
+        "version": model_metadata.get("version", "unknown"),
+        "stage": model_metadata.get("stage", "unknown"),
+        "run_id": model_metadata.get("run_id", "unknown"),
         "features": feature_names,
         "feature_count": len(feature_names),
         "model_loaded": model is not None,
-        "framework": "scikit-learn",
-        "last_updated": "2025-01-04"
+        "framework": "scikit-learn"
     }
 
 # Root endpoint
@@ -255,6 +233,7 @@ async def root():
         "service": "Churn Prediction API",
         "version": "1.0.0",
         "status": "running",
+        "model_version": model_metadata.get("version", "unknown"),
         "endpoints": {
             "health": "/health",
             "predict": "/predict",
