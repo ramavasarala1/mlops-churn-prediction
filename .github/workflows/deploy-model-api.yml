@@ -1,5 +1,4 @@
 # This file has github workflow
-# Updated - Oct 5 2025
 name: CI/CD Pipeline for ML Model API
 
 on:
