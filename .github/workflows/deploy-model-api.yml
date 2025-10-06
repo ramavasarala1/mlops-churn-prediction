@@ -1,4 +1,3 @@
-# This file has github workflow
 name: CI/CD Pipeline for ML Model API
 
 on:
