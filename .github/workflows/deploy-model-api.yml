@@ -231,7 +231,7 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           MODEL_NAME: ${{ env.MODEL_NAME }}
-          MODEL_STAGE: 'Staging'
+          MODEL_VERSION: ${{ steps.get_model.outputs.version }}
           OUTPUT_DIR: ./models
       
       - name: Azure Login
