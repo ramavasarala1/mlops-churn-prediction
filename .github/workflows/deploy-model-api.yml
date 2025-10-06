@@ -1,34 +1,21 @@
-name: Deploy ML Model to AKS
+name: CI/CD Pipeline for ML Model API
 
 on:
-  # Manual trigger
-  workflow_dispatch:
-    inputs:
-      model_name:
-        description: 'Model name'
-        required: true
-        default: 'churn_prediction_model'
-      model_stage:
-        description: 'Model stage'
-        required: true
-        default: 'Staging'
-        type: choice
-        options:
-          - Staging
-          - Production
-      deploy_environment:
-        description: 'Deploy to'
-        required: true
-        default: 'dev'
-        type: choice
-        options:
-          - dev
-          - staging
-          - production
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/model-api/**'
+      - 'kubernetes/manifests/**'
+      - '.github/workflows/deploy_model_api.yaml'
   
-  # Scheduled check (every 6 hours)
-  # schedule:
-  #   - cron: '0 */6 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/model-api/**'
+      - 'kubernetes/manifests/**'
+      - '.github/workflows/deploy_model_api.yaml'
 
 env:
   MODEL_NAME: churn_prediction_model
@@ -37,81 +24,13 @@ env:
   AKS_CLUSTER: ${{ secrets.AKS_CLUSTER }}
 
 jobs:
-  check-model:
-    name: Check for New Model
+  # ============================================
+  # CI: Runs on Pull Requests
+  # ============================================
+  ci_build:
+    name: CI - Build and Validate
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    outputs:
-      should_deploy: ${{ steps.check.outputs.should_deploy }}
-      model_version: ${{ steps.check.outputs.model_version }}
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
-        run: |
-          pip install mlflow databricks-cli
-      
-      - name: Check for new model
-        id: check
-        run: |
-          python << 'EOF'
-          import os
-          from mlflow.tracking import MlflowClient
-          import mlflow
-          
-          # Manual trigger always deploys
-          if "${{ github.event_name }}" == "workflow_dispatch":
-              print("Manual trigger - will deploy")
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  f.write("should_deploy=true\n")
-                  f.write("model_version=latest\n")
-              exit(0)
-          
-          # For scheduled runs, check MLflow
-          try:
-              databricks_host = os.environ['DATABRICKS_HOST']
-              databricks_token = os.environ['DATABRICKS_TOKEN']
-              
-              mlflow.set_tracking_uri(f"databricks://{databricks_host}")
-              os.environ['DATABRICKS_TOKEN'] = databricks_token
-              
-              client = MlflowClient()
-              model_name = "${{ env.MODEL_NAME }}"
-              
-              versions = client.get_latest_versions(model_name, stages=["Staging"])
-              
-              if versions:
-                  version = versions[0].version
-                  print(f"Found model version {version} in Staging")
-                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                      f.write("should_deploy=true\n")
-                      f.write(f"model_version={version}\n")
-              else:
-                  print("No model in Staging")
-                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                      f.write("should_deploy=false\n")
-          except Exception as e:
-              print(f"Error: {e}")
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  f.write("should_deploy=false\n")
-          EOF
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-
-  build-and-push:
-    name: Build and Push Docker Image
-    needs: check-model
-    if: needs.check-model.outputs.should_deploy == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.image.outputs.tag }}
     
     steps:
       - name: Checkout code
@@ -126,6 +45,40 @@ jobs:
         run: |
           pip install mlflow databricks-cli
       
+      - name: Get latest model version
+        id: get_model
+        run: |
+          python << 'EOF'
+          import os
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          
+          # Configure Databricks connection
+          databricks_host = os.environ['DATABRICKS_HOST']
+          databricks_token = os.environ['DATABRICKS_TOKEN']
+          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
+          os.environ['DATABRICKS_TOKEN'] = databricks_token
+          
+          client = MlflowClient()
+          model_name = os.environ['MODEL_NAME']
+          
+          # Get latest version (any stage)
+          versions = client.search_model_versions(f"name='{model_name}'")
+          if versions:
+              latest = max(versions, key=lambda v: int(v.version))
+              version_number = latest.version
+              print(f"Latest model version: {version_number}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"version={version_number}\n")
+          else:
+              print("No model versions found")
+              exit(1)
+          EOF
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+      
       - name: Download model from MLflow
         working-directory: src/model-api
         run: |
@@ -133,8 +86,8 @@ jobs:
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-          MODEL_NAME: ${{ github.event.inputs.model_name || env.MODEL_NAME }}
-          MODEL_STAGE: ${{ github.event.inputs.model_stage || 'Staging' }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+          MODEL_VERSION: ${{ steps.get_model.outputs.version }}
           OUTPUT_DIR: ./models
       
       - name: Azure Login
@@ -146,14 +99,119 @@ jobs:
         run: |
           az acr login --name ${{ env.ACR_NAME }}
       
-      - name: Set image tag
-        id: image
+      - name: Build and push validation image
+        working-directory: src/model-api
         run: |
-          TAG="v${{ needs.check-model.outputs.model_version }}-$(git rev-parse --short HEAD)"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          IMAGE_TAG="pr-${{ github.event.pull_request.number }}"
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/churn-model:${IMAGE_TAG} .
+          docker push ${{ env.ACR_NAME }}.azurecr.io/churn-model:${IMAGE_TAG}
+          echo "✅ PR validation image built and pushed: ${IMAGE_TAG}"
+
+  # ============================================
+  # CD: Runs on Push to Main
+  # ============================================
+  cd_deploy_staging:
+    name: CD - Deploy to Staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      image_tag: ${{ steps.set_tag.outputs.tag }}
+      model_version: ${{ steps.get_model.outputs.version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
       
-      - name: Build and push Docker image
+      - name: Set image tag
+        id: set_tag
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=${SHORT_SHA}" >> $GITHUB_ENV
+          echo "📦 Image tag: ${SHORT_SHA}"
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install MLflow
+        run: |
+          pip install mlflow databricks-cli
+      
+      - name: Get latest model version and transition to Staging
+        id: get_model
+        run: |
+          python << 'EOF'
+          import os
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          
+          # Configure Databricks connection
+          databricks_host = os.environ['DATABRICKS_HOST']
+          databricks_token = os.environ['DATABRICKS_TOKEN']
+          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
+          os.environ['DATABRICKS_TOKEN'] = databricks_token
+          
+          client = MlflowClient()
+          model_name = os.environ['MODEL_NAME']
+          
+          # Get latest version
+          versions = client.search_model_versions(f"name='{model_name}'")
+          if not versions:
+              print("No model versions found")
+              exit(1)
+          
+          latest = max(versions, key=lambda v: int(v.version))
+          version_number = latest.version
+          current_stage = latest.current_stage
+          
+          print(f"Latest model version: {version_number}")
+          print(f"Current stage: {current_stage}")
+          
+          # Transition to Staging if not already there
+          if current_stage != "Staging":
+              print(f"Transitioning model version {version_number} to Staging")
+              client.transition_model_version_stage(
+                  name=model_name,
+                  version=version_number,
+                  stage="Staging",
+                  archive_existing_versions=True
+              )
+              print("✅ Model transitioned to Staging")
+          else:
+              print("Model already in Staging stage")
+          
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"version={version_number}\n")
+          EOF
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+      
+      - name: Download model from MLflow
+        working-directory: src/model-api
+        run: |
+          python ../../scripts/model_loader.py
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+          MODEL_STAGE: 'Staging'
+          OUTPUT_DIR: ./models
+      
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+      
+      - name: Build and push official image
         working-directory: src/model-api
         run: |
           docker build -t ${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ env.IMAGE_TAG }} .
@@ -163,66 +221,7 @@ jobs:
           docker tag ${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ env.IMAGE_TAG }} \
                      ${{ env.ACR_NAME }}.azurecr.io/churn-model:latest
           docker push ${{ env.ACR_NAME }}.azurecr.io/churn-model:latest
-
-  deploy-dev:
-    name: Deploy to Dev
-    needs: [check-model, build-and-push]
-    if: |
-      needs.check-model.outputs.should_deploy == 'true' &&
-      (github.event.inputs.deploy_environment == 'dev' || github.event_name == 'schedule')
-    runs-on: ubuntu-latest
-    environment: dev
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      
-      - name: Get AKS credentials
-        run: |
-          az aks get-credentials \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name ${{ env.AKS_CLUSTER }} \
-            --overwrite-existing
-      
-      - name: Deploy to dev namespace
-        run: |
-          # Set environment variables for substitution
-          export NAMESPACE="dev"
-          export IMAGE="${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ needs.build-and-push.outputs.image_tag }}"
-          export MODEL_VERSION="${{ needs.check-model.outputs.model_version }}"
-          
-          # Create namespace if not exists
-          kubectl create namespace dev --dry-run=client -o yaml | kubectl apply -f -
-          
-          # Apply manifests (you'll create these in Step 5)
-          envsubst < kubernetes/manifests/deployment.yaml | kubectl apply -n dev -f -
-      
-      - name: Wait for deployment
-        run: |
-          kubectl rollout status deployment/churn-model -n dev --timeout=5m
-
-  deploy-staging:
-    name: Deploy to Staging
-    needs: [check-model, build-and-push, deploy-dev]
-    if: |
-      needs.check-model.outputs.should_deploy == 'true' &&
-      (github.event.inputs.deploy_environment == 'staging' || github.event_name == 'schedule')
-    runs-on: ubuntu-latest
-    environment: staging
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          echo "✅ Official image built and pushed: ${{ env.IMAGE_TAG }}"
       
       - name: Get AKS credentials
         run: |
@@ -234,29 +233,75 @@ jobs:
       - name: Deploy to staging namespace
         run: |
           export NAMESPACE="staging"
-          export IMAGE="${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ needs.build-and-push.outputs.image_tag }}"
-          export MODEL_VERSION="${{ needs.check-model.outputs.model_version }}"
+          export IMAGE="${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ env.IMAGE_TAG }}"
+          export MODEL_VERSION="${{ steps.get_model.outputs.version }}"
           
+          # Create namespace if not exists
           kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Apply manifests
           envsubst < kubernetes/manifests/deployment.yaml | kubectl apply -n staging -f -
+          echo "📦 Deployed image: ${IMAGE}"
+          echo "🤖 Model version: ${MODEL_VERSION}"
       
       - name: Wait for deployment
         run: |
           kubectl rollout status deployment/churn-model -n staging --timeout=5m
           echo "✅ Staging deployment successful"
 
-  deploy-production:
-    name: Deploy to Production
-    needs: [check-model, build-and-push, deploy-staging]
-    if: |
-      needs.check-model.outputs.should_deploy == 'true' &&
-      github.event.inputs.deploy_environment == 'production'
+  # ============================================
+  # Production Deployment (Manual Approval)
+  # ============================================
+  deploy_to_production:
+    name: CD - Deploy to Production
+    needs: cd_deploy_staging
     runs-on: ubuntu-latest
-    environment: production  # This requires manual approval in GitHub
+    environment: production
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install MLflow
+        run: |
+          pip install mlflow databricks-cli
+      
+      - name: Transition model to Production in Databricks
+        run: |
+          python << 'EOF'
+          import os
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          
+          # Configure Databricks connection
+          databricks_host = os.environ['DATABRICKS_HOST']
+          databricks_token = os.environ['DATABRICKS_TOKEN']
+          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
+          os.environ['DATABRICKS_TOKEN'] = databricks_token
+          
+          client = MlflowClient()
+          model_name = os.environ['MODEL_NAME']
+          version_number = os.environ['MODEL_VERSION']
+          
+          print(f"Transitioning model version {version_number} to Production")
+          client.transition_model_version_stage(
+              name=model_name,
+              version=version_number,
+              stage="Production",
+              archive_existing_versions=True
+          )
+          print("✅ Model transitioned to Production in Databricks")
+          EOF
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+          MODEL_VERSION: ${{ needs.cd_deploy_staging.outputs.model_version }}
       
       - name: Azure Login
         uses: azure/login@v1
@@ -273,11 +318,16 @@ jobs:
       - name: Deploy to production namespace
         run: |
           export NAMESPACE="production"
-          export IMAGE="${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ needs.build-and-push.outputs.image_tag }}"
-          export MODEL_VERSION="${{ needs.check-model.outputs.model_version }}"
+          export IMAGE="${{ env.ACR_NAME }}.azurecr.io/churn-model:${{ needs.cd_deploy_staging.outputs.image_tag }}"
+          export MODEL_VERSION="${{ needs.cd_deploy_staging.outputs.model_version }}"
           
+          # Create namespace if not exists
           kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Apply manifests
           envsubst < kubernetes/manifests/deployment.yaml | kubectl apply -n production -f -
+          echo "📦 Deployed image: ${IMAGE}"
+          echo "🤖 Model version: ${MODEL_VERSION}"
       
       - name: Wait for deployment
         run: |
@@ -288,5 +338,8 @@ jobs:
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag -a "prod-${{ needs.build-and-push.outputs.image_tag }}" -m "Production deployment"
-          git push origin "prod-${{ needs.build-and-push.outputs.image_tag }}" || true
+          
+          TAG_NAME="prod-${{ needs.cd_deploy_staging.outputs.image_tag }}"
+          git tag -a "${TAG_NAME}" -m "Production deployment of commit ${{ needs.cd_deploy_staging.outputs.image_tag }} (model v${{ needs.cd_deploy_staging.outputs.model_version }})"
+          git push origin "${TAG_NAME}" || true
+          echo "🏷️  Created tag: ${TAG_NAME}"
