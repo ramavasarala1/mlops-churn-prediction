@@ -54,14 +54,28 @@ jobs:
           from mlflow.tracking import MlflowClient
           
           # Configure Databricks connection
-          databricks_host = os.environ['DATABRICKS_HOST'].replace("https://", "").replace("http://", "")
+          databricks_host = os.environ['DATABRICKS_HOST']
           databricks_token = os.environ['DATABRICKS_TOKEN']
+          
+          if not databricks_host or not databricks_token:
+              raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
+          
+          # Clean host - remove protocol if present
+          databricks_host = databricks_host.replace("https://", "").replace("http://", "")
+          
+          # Set tracking URI with https protocol
+          tracking_uri = f"https://{databricks_host}"
+          
+          # Set required environment variables for MLflow
           os.environ['DATABRICKS_HOST'] = databricks_host
           os.environ['DATABRICKS_TOKEN'] = databricks_token
-        
-          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
+          os.environ['MLFLOW_TRACKING_TOKEN'] = databricks_token
           
-          client = MlflowClient()
+          mlflow.set_tracking_uri(tracking_uri)
+          print(f"Connecting to: {tracking_uri}")
+          
+          # Create client
+          client = MlflowClient(tracking_uri=tracking_uri)
           model_name = os.environ['MODEL_NAME']
           
           # Get latest version (any stage)
@@ -153,10 +167,26 @@ jobs:
           # Configure Databricks connection
           databricks_host = os.environ['DATABRICKS_HOST']
           databricks_token = os.environ['DATABRICKS_TOKEN']
-          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
-          os.environ['DATABRICKS_TOKEN'] = databricks_token
           
-          client = MlflowClient()
+          if not databricks_host or not databricks_token:
+              raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
+          
+          # Clean host - remove protocol if present
+          databricks_host = databricks_host.replace("https://", "").replace("http://", "")
+          
+          # Set tracking URI with https protocol
+          tracking_uri = f"https://{databricks_host}"
+          
+          # Set required environment variables for MLflow
+          os.environ['DATABRICKS_HOST'] = databricks_host
+          os.environ['DATABRICKS_TOKEN'] = databricks_token
+          os.environ['MLFLOW_TRACKING_TOKEN'] = databricks_token
+          
+          mlflow.set_tracking_uri(tracking_uri)
+          print(f"Connecting to: {tracking_uri}")
+          
+          # Create client
+          client = MlflowClient(tracking_uri=tracking_uri)
           model_name = os.environ['MODEL_NAME']
           
           # Get latest version
