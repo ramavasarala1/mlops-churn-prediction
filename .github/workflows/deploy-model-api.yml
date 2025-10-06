@@ -54,10 +54,12 @@ jobs:
           from mlflow.tracking import MlflowClient
           
           # Configure Databricks connection
-          databricks_host = os.environ['DATABRICKS_HOST']
+          databricks_host = os.environ['DATABRICKS_HOST'].replace("https://", "").replace("http://", "")
           databricks_token = os.environ['DATABRICKS_TOKEN']
-          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
+          os.environ['DATABRICKS_HOST'] = databricks_host
           os.environ['DATABRICKS_TOKEN'] = databricks_token
+        
+          mlflow.set_tracking_uri(f"databricks://{databricks_host}")
           
           client = MlflowClient()
           model_name = os.environ['MODEL_NAME']
